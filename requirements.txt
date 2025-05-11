@@ -1,4 +1,4 @@
-pip install steam
-pip install -U "steam[client]"
-pip install -U steam
-pip install aiogram
+steam
+-U "steam[client]"
+-U steam
+aiogram
