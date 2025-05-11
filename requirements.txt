@@ -1,4 +1,4 @@
 steam
--U "steam[client]"
--U steam
+steam[client]
+steam
 aiogram
