@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7714431219:AAGpgW9nvjlJsb1JAf2i5tO0aQipqFW0LWA"
+BOT_TOKEN = "BOT_TOKEN"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
