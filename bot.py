@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.client.bot import DefaultBotProperties
 from steam.client import SteamClient
-from steam.enums import EResult, EPersonaState
+from steam.enums import EResult
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,8 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "7714431219:AAGpgW9nvjlJsb1JAf2i5tO0aQipqFW0LWA"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -53,64 +52,149 @@ def save_session(client: SteamClient, user_id: int):
 
 def load_session(client: SteamClient, user_id: int):
     """Загружает куки сессии из файла."""
+    session_file = f"session_{user_id}.pkl"
     try:
-        with open(f"session_{user_id}.pkl", "rb") as f:
+        if not os.path.exists(session_file) or os.path.getsize(session_file) == 0:
+            logger.warning(f"Session file {session_file} is missing or empty")
+            return False
+        with open(session_file, "rb") as f:
             client._session = pickle.load(f)
         logger.info(f"Session loaded for {user_id}")
         return True
     except Exception as e:
         logger.error(f"Error loading session for {user_id}: {str(e)}")
+        if os.path.exists(session_file):
+            try:
+                os.remove(session_file)
+                logger.info(f"Removed corrupted session file {session_file}")
+            except Exception as rm_e:
+                logger.error(f"Failed to remove session file {session_file}: {str(rm_e)}")
         return False
 
 
-def run_client_events(client: SteamClient, user_id: int):
-    """Запускает обработку событий SteamClient в отдельном потоке."""
-    try:
-        client.run_forever()
-        logger.info(f"SteamClient event loop stopped for {user_id}")
-    except Exception as e:
-        logger.error(f"Error in SteamClient event loop for {user_id}: {str(e)}")
-
-
-async def try_relogin(client: SteamClient, username: str, password: str, user_id: int) -> bool:
-    """Пытается восстановить сессию через relogin или login."""
-    try:
-        if load_session(client, user_id):
-            result = client.relogin()
-        else:
-            result = client.login(username, password)
-        logger.info(f"Relogin attempt for {username}: {result}")
-        if result == EResult.OK:
-            save_session(client, user_id)
-            threading.Thread(target=run_client_events, args=(client, user_id), daemon=True).start()
-            return True
-        elif result in (EResult.AccountLogonDenied, EResult.AccountLoginDeniedNeedTwoFactor):
-            logger.info(f"Relogin for {username} requires 2FA or Steam Guard")
-            return False
-        else:
-            logger.error(f"Relogin failed for {username}: {result.name}")
-            return False
-    except Exception as e:
-        logger.error(f"Error during relogin for {user_id}: {str(e)}")
-        return False
-
-
-async def load_user_data(client: SteamClient, user_id: int, max_attempts: int = 3) -> bool:
-    """Пытается загрузить данные пользователя с повторными попытками."""
+async def try_relogin(client: SteamClient, username: str, password: str, user_id: int, max_attempts: int = 5) -> bool:
+    """Пытается восстановить сессию через relogin или login с несколькими попытками."""
     for attempt in range(max_attempts):
         try:
-            if client.steam_id:
-                client.get_user(client.steam_id)
-                logger.info(f"User data loaded for {user_id} on attempt {attempt + 1}")
-                return True
+            if load_session(client, user_id):
+                result = client.relogin()
             else:
-                logger.warning(f"No steam_id available for {user_id} on attempt {attempt + 1}")
+                result = client.login(username, password)
+            logger.info(f"Relogin attempt {attempt + 1} for {username}: {result}")
+            if result == EResult.OK:
+                save_session(client, user_id)
+                if session := user_sessions.get(user_id):
+                    if "farming_games" in session and session["farming_games"]:
+                        client.games_played(session["farming_games"])
+                        logger.info(f"Restored farming for {user_id}: {session['farming_games']}")
+                threading.Thread(target=run_client_forever, args=(client, user_id), daemon=True).start()
+                return True
+            elif result in (EResult.AccountLogonDenied, EResult.AccountLoginDeniedNeedTwoFactor):
+                logger.info(f"Relogin for {username} requires 2FA or Steam Guard")
                 return False
+            elif result == EResult.TryAnotherCM:
+                logger.warning(f"TryAnotherCM for {username}, switching CM server")
+                client.disconnect()
+                await asyncio.sleep(10)
+                continue
+            else:
+                logger.error(f"Relogin failed for {username}: {result.name}")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(5)
         except Exception as e:
-            logger.error(f"Error loading user data for {user_id} on attempt {attempt + 1}: {str(e)}")
+            logger.error(f"Error during relogin for {user_id} on attempt {attempt + 1}: {str(e)}")
+            if "429" in str(e):
+                await asyncio.sleep(60)
+            elif "Ran out of input" in str(e):
+                logger.warning(f"Session file corrupted for {user_id}, attempting fresh login")
+                result = client.login(username, password)
+                if result == EResult.OK:
+                    save_session(client, user_id)
+                    if session := user_sessions.get(user_id):
+                        if "farming_games" in session and session["farming_games"]:
+                            client.games_played(session["farming_games"])
+                            logger.info(f"Restored farming for {user_id}: {session['farming_games']}")
+                    threading.Thread(target=run_client_forever, args=(client, user_id), daemon=True).start()
+                    return True
+                else:
+                    logger.error(f"Fresh login failed for {username}: {result.name}")
             if attempt < max_attempts - 1:
+                await asyncio.sleep(10)
+    return False
+
+
+def run_client_forever(client: SteamClient, user_id: int):
+    """Запускает бесконечный цикл обработки событий SteamClient в отдельном потоке."""
+    try:
+        logger.info(f"Starting run_forever for user {user_id}")
+        client.run_forever()
+        logger.info(f"SteamClient run_forever stopped for {user_id}")
+    except Exception as e:
+        logger.error(f"Error in SteamClient run_forever for {user_id}: {str(e)}")
+        # Попытка переподключения
+        if user_id in user_sessions:
+            session = user_sessions[user_id]
+            if session.get("password"):
+                logger.info(f"Attempting to reconnect for user {user_id}")
+                asyncio.run_coroutine_threadsafe(
+                    try_relogin(client, session["username"], session["password"], user_id),
+                    asyncio.get_event_loop()
+                )
+
+
+async def get_game_name(client: SteamClient, app_id: int) -> str:
+    """Получает название игры по AppID."""
+    try:
+        await asyncio.sleep(1)
+        info = client.get_product_info([app_id])
+        return info["apps"][app_id]["common"]["name"] if info and "apps" in info and app_id in info["apps"] else str(
+            app_id)
+    except Exception as e:
+        logger.error(f"Error getting game name for AppID {app_id}: {str(e)}")
+        return str(app_id)
+
+
+async def is_session_valid(client: SteamClient, username: str, password: str, user_id: int) -> bool:
+    """Проверяет валидность сессии без вызова выхода."""
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            if not client.connected:
+                logger.info(f"Client not connected for {user_id}, attempting reconnect (attempt {attempt + 1})")
+                client.reconnect()
                 await asyncio.sleep(2)
-    logger.error(f"Failed to load user data for {user_id} after {max_attempts} attempts")
+
+            if not client.logged_on:
+                logger.info(f"Session not logged on for {user_id}, attempting reconnect (attempt {attempt + 1})")
+                if password:
+                    logger.info(f"Reconnect failed for {user_id}, attempting login (attempt {attempt + 1})")
+                    result = client.login(username, password)
+                    if result == EResult.OK:
+                        save_session(client, user_id)
+                        session = user_sessions.get(user_id)
+                        if session and "farming_games" in session and session["farming_games"]:
+                            client.games_played(session["farming_games"])
+                            logger.info(f"Restored farming for {user_id}: {session['farming_games']}")
+                        threading.Thread(target=run_client_forever, args=(client, user_id), daemon=True).start()
+                        return True
+                    logger.warning(f"Login failed for {user_id}, result: {result}")
+                elif not client.logged_on:
+                    logger.info(f"Session still not logged on after reconnect for {user_id}, will retry")
+            else:
+                session = user_sessions.get(user_id)
+                if session and "farming_games" in session and session["farming_games"]:
+                    client.games_played(session["farming_games"])  # Поддерживаем фарминг
+                    logger.debug(f"Farming games active for {user_id}: {session['farming_games']}")
+                logger.info(f"Session valid (logged_on=True) for {user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Session validation failed for {user_id} on attempt {attempt + 1}: {str(e)}")
+            if "429" in str(e):
+                logger.warning(f"Rate limit hit for {user_id}, pausing for 60 seconds")
+                await asyncio.sleep(60)
+            elif attempt < max_attempts - 1:
+                await asyncio.sleep(10)
+    logger.error(f"Session validation failed for {user_id} after {max_attempts} attempts")
     return False
 
 
@@ -123,14 +207,10 @@ async def start(message: Message, state: FSMContext):
     session = user_sessions.get(message.from_user.id)
     if session and await is_session_valid(session["client"], session["username"], session.get("password"),
                                           message.from_user.id):
-        await message.answer("Вы уже авторизованы! Используйте /status для проверки статуса или /logout для выхода.")
+        await message.answer("Вы уже авторизованы! Используйте /logout или /start_farm.")
         return
 
-    if session:
-        user_sessions.pop(message.from_user.id, None)
-        logger.info(f"Removed invalid session for user {message.from_user.id}")
-
-    await message.answer("Привет! Введи логин от Steam:")
+    await message.answer("Введи логин Steam:")
     await state.set_state(AuthStates.username)
 
 
@@ -144,189 +224,17 @@ async def logout(message: Message, state: FSMContext):
     if session:
         try:
             session["client"].logout()
+            session["client"].disconnect()
             logger.info(f"User {message.from_user.id} logged out")
         except Exception as e:
             logger.error(f"Error during logout for user {message.from_user.id}: {str(e)}")
-        user_sessions.pop(message.from_user.id, None)
+        session["password"] = None
+        session["farming_games"] = []
         if os.path.exists(f"session_{message.from_user.id}.pkl"):
             os.remove(f"session_{message.from_user.id}.pkl")
             logger.info(f"Session file removed for {message.from_user.id}")
-    await message.answer("Вы успешно вышли из аккаунта!")
+    await message.answer("Вы вышли из аккаунта! Используйте /start для входа.")
     await state.clear()
-
-
-@dp.message(Command("status"))
-async def status(message: Message, state: FSMContext):
-    if message.message_id in processed_messages:
-        return
-    processed_messages.add(message.message_id)
-
-    session = user_sessions.get(message.from_user.id)
-    if not session or not await is_session_valid(session["client"], session["username"], session.get("password"),
-                                                 message.from_user.id):
-        if session:
-            user_sessions.pop(message.from_user.id, None)
-            logger.info(f"Removed invalid session for user {message.from_user.id}")
-        await message.answer("Вы не авторизованы. Войдите с помощью /start.")
-        return
-
-    client = session["client"]
-    # Пытаемся загрузить данные пользователя
-    await load_user_data(client, message.from_user.id)
-    await asyncio.sleep(1)  # Даем время на загрузку данных
-
-    status_info = ["<b>📊 Статус аккаунта Steam</b>"]
-    errors = []
-
-    # Проверяем каждый атрибут отдельно
-    try:
-        steam_id = client.steam_id if client.steam_id else None
-        status_info.append(f"<b>SteamID64:</b> {steam_id.id64 if steam_id else 'Недоступно'}")
-        status_info.append(f"<b>Account ID:</b> {steam_id.account_id if steam_id else 'Недоступно'}")
-        status_info.append(f"<b>Instance ID:</b> {steam_id.instance_id if steam_id else 'Недоступно'}")
-        status_info.append(f"<b>Тип аккаунта:</b> {steam_id.type.name if steam_id else 'Недоступно'}")
-        status_info.append(f"<b>Профиль:</b> {steam_id.community_url if steam_id else 'Недоступно'}")
-        logger.info(f"SteamID data accessed for {message.from_user.id}")
-    except Exception as e:
-        errors.append(f"SteamID data: {str(e)}")
-        logger.error(f"Error accessing SteamID data for {message.from_user.id}: {str(e)}")
-
-    try:
-        user_name = client.user.name if client.user and hasattr(client.user,
-                                                                'name') and client.user.name else "Недоступно"
-        status_info.append(f"<b>Имя:</b> {user_name}")
-        logger.info(f"User name accessed for {message.from_user.id}")
-    except Exception as e:
-        errors.append(f"User name: {str(e)}")
-        logger.error(f"Error accessing user name for {message.from_user.id}: {str(e)}")
-
-    try:
-        user_level = client.user.level if client.user and hasattr(client.user, 'level') else "Недоступно"
-        status_info.append(f"<b>Уровень:</b> {user_level}")
-        logger.info(f"User level accessed for {message.from_user.id}")
-    except Exception as e:
-        errors.append(f"User level: {str(e)}")
-        logger.error(f"Error accessing user level for {message.from_user.id}: {str(e)}")
-
-    try:
-        friends_count = len(client.friends) if client.friends and hasattr(client.friends, '__len__') else 0
-        status_info.append(f"<b>Друзей:</b> {friends_count}")
-        logger.info(f"Friends count accessed for {message.from_user.id}")
-    except Exception as e:
-        errors.append(f"Friends count: {str(e)}")
-        logger.error(f"Error accessing friends count for {message.from_user.id}: {str(e)}")
-
-    try:
-        user_state = client.user.state.name if client.user and hasattr(client.user,
-                                                                       'state') and client.user.state else "Недоступно"
-        status_info.append(f"<b>Статус:</b> {user_state}")
-        logger.info(f"User state accessed for {message.from_user.id}")
-    except Exception as e:
-        errors.append(f"User state: {str(e)}")
-        logger.error(f"Error accessing user state for {message.from_user.id}: {str(e)}")
-
-    if errors:
-        status_info.append(
-            "<b>Ошибки:</b> Некоторые данные недоступны. Попробуйте /status еще раз или /force_reconnect.")
-        logger.error(f"Status errors for {message.from_user.id}: {'; '.join(errors)}")
-        await message.answer("\n".join(status_info))
-    else:
-        await message.answer("\n".join(status_info))
-        logger.info(f"Status requested for {message.from_user.id}: success")
-
-
-@dp.message(Command("relogin"))
-async def relogin(message: Message, state: FSMContext):
-    if message.message_id in processed_messages:
-        return
-    processed_messages.add(message.message_id)
-
-    session = user_sessions.get(message.from_user.id)
-    if not session:
-        await message.answer("Вы не авторизованы. Войдите с помощью /start.")
-        return
-
-    client = session["client"]
-    username = session["username"]
-    password = session.get("password")
-
-    if not password:
-        await message.answer("Пароль не сохранен. Пожалуйста, войдите заново с /start.")
-        user_sessions.pop(message.from_user.id, None)
-        await state.clear()
-        return
-
-    await message.answer("⏳ Пытаюсь восстановить сессию...")
-    try:
-        if await try_relogin(client, username, password, message.from_user.id):
-            await message.answer("✅ Сессия восстановлена! Используйте /status для проверки.")
-        else:
-            await message.answer("📧 Введи код из Email (Steam Guard) или код 2FA:")
-            await state.set_state(AuthStates.steam_guard)
-    except Exception as e:
-        logger.error(f"Error during relogin for {message.from_user.id}: {str(e)}")
-        user_sessions.pop(message.from_user.id, None)
-        await message.answer("❌ Ошибка при восстановлении сессии. Войдите заново с /start.")
-        await state.clear()
-
-
-@dp.message(Command("force_reconnect"))
-async def force_reconnect(message: Message, state: FSMContext):
-    if message.message_id in processed_messages:
-        return
-    processed_messages.add(message.message_id)
-
-    session = user_sessions.get(message.from_user.id)
-    if not session:
-        await message.answer("Вы не авторизованы. Войдите с помощью /start.")
-        return
-
-    client = session["client"]
-    username = session["username"]
-    password = session.get("password")
-
-    await message.answer("⏳ Пытаюсь восстановить соединение...")
-    try:
-        client.reconnect()
-        await asyncio.sleep(1)
-        if client.logged_on:
-            await load_user_data(client, message.from_user.id)
-            await message.answer("✅ Соединение восстановлено! Используйте /status для проверки.")
-            logger.info(f"Force reconnect successful for {message.from_user.id}")
-        elif password and await try_relogin(client, username, password, message.from_user.id):
-            await message.answer("✅ Сессия восстановлена через relogin! Используйте /status для проверки.")
-        else:
-            await message.answer("📧 Введи код из Email (Steam Guard) или код 2FA:")
-            await state.set_state(AuthStates.steam_guard)
-    except Exception as e:
-        logger.error(f"Error during force reconnect for {message.from_user.id}: {str(e)}")
-        await message.answer("❌ Ошибка при восстановлении соединения. Попробуйте /relogin или /start.")
-
-
-@dp.message(Command("check_session"))
-async def check_session(message: Message):
-    if message.message_id in processed_messages:
-        return
-    processed_messages.add(message.message_id)
-
-    session = user_sessions.get(message.from_user.id)
-    if not session:
-        await message.answer("Нет активной сессии.")
-        return
-    client = session["client"]
-    is_valid = await is_session_valid(client, session["username"], session.get("password"), message.from_user.id)
-    user_available = client.user is not None
-    steam_id_available = client.steam_id is not None
-    friends_available = client.friends is not None
-    await message.answer(
-        f"Сессия {'валидна' if is_valid else 'невалидна'}.\n"
-        f"Logged on: {client.logged_on}\n"
-        f"SteamID: {client.steam_id if steam_id_available else 'Недоступно'}\n"
-        f"User data: {'Доступно' if user_available else 'Недоступно'}\n"
-        f"Friends: {'Доступно' if friends_available else 'Недоступно'}"
-    )
-    logger.info(
-        f"Session check for {message.from_user.id}: valid={is_valid}, logged_on={client.logged_on}, user={user_available}, steam_id={steam_id_available}, friends={friends_available}")
 
 
 @dp.message(Command("cancel"))
@@ -335,20 +243,89 @@ async def cancel(message: Message, state: FSMContext):
         return
     processed_messages.add(message.message_id)
 
-    if message.from_user.id in user_sessions:
-        user_sessions.pop(message.from_user.id, None)
+    session = user_sessions.get(message.from_user.id)
+    if session:
+        session["password"] = None
+        session["farming_games"] = []
         logger.info(f"Session cancelled for user {message.from_user.id}")
-    await message.answer("Процесс авторизации отменен. Начните заново с /start.")
+    await message.answer("Авторизация отменена. Начните заново с /start.")
     await state.clear()
+
+
+@dp.message(Command("start_farm"))
+async def start_farm(message: Message, state: FSMContext):
+    if message.message_id in processed_messages:
+        return
+    processed_messages.add(message.message_id)
+
+    session = user_sessions.get(message.from_user.id)
+    if not session or not await is_session_valid(session["client"], session["username"], session.get("password"),
+                                                 message.from_user.id):
+        await message.answer("Вы не авторизованы. Попробуйте /start.")
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Укажите AppID игры, например: /start_farm 440")
+        return
+
+    try:
+        app_ids = [int(app_id) for app_id in args[1].split(",")]
+        if len(app_ids) > 32:
+            await message.answer("Нельзя фармить более 32 игр!")
+            return
+    except ValueError:
+        await message.answer("AppID должен быть числом или списком чисел, разделенных запятыми.")
+        return
+
+    client = session["client"]
+    session["farming_games"] = app_ids
+    try:
+        client.games_played(app_ids)
+        game_names = [await get_game_name(client, app_id) for app_id in app_ids]
+        await message.answer(f"✅ Фарм начат: {', '.join(game_names)}")
+        logger.info(f"Started farming for {message.from_user.id}: {app_ids}")
+    except Exception as e:
+        session["farming_games"] = []
+        logger.error(f"Error starting farm for {message.from_user.id}: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте снова.")
+
+
+@dp.message(Command("stop_farm"))
+async def stop_farm(message: Message, state: FSMContext):
+    if message.message_id in processed_messages:
+        return
+    processed_messages.add(message.message_id)
+
+    session = user_sessions.get(message.from_user.id)
+    if not session or not await is_session_valid(session["client"], session["username"], session.get("password"),
+                                                 message.from_user.id):
+        await message.answer("Вы не авторизованы. /start.")
+        return
+
+    client = session["client"]
+    if "farming_games" not in session or not session["farming_games"]:
+        await message.answer("Фарм не запущен.")
+        return
+
+    try:
+        client.games_played([])
+        game_names = [await get_game_name(client, app_id) for app_id in session["farming_games"]]
+        session["farming_games"] = []
+        await message.answer(f"🛑 Фарм остановлен: {', '.join(game_names)}")
+        logger.info(f"Stopped farming for {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error stopping farm for {message.from_user.id}: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте снова.")
 
 
 @dp.message(AuthStates.username)
 async def get_username(message: Message, state: FSMContext):
     if not message.text:
-        await message.answer("Пожалуйста, введите корректный логин.")
+        await message.answer("Введите корректный логин.")
         return
     await state.update_data(username=message.text)
-    await message.answer("Теперь введи пароль:")
+    await message.answer("Введите пароль:")
     await state.set_state(AuthStates.password)
 
 
@@ -358,35 +335,42 @@ async def get_password(message: Message, state: FSMContext):
     username = data["username"]
     password = message.text
 
-    await message.answer("⏳ Пытаюсь войти в аккаунт...")
-
+    await message.answer("⏳ Вхожу в аккаунт...")
     client = SteamClient()
-    user_sessions[message.from_user.id] = {"client": client, "username": username, "password": password, "attempts": 0}
+    user_sessions[message.from_user.id] = {
+        "client": client,
+        "username": username,
+        "password": password,
+        "attempts": 0,
+        "farming_games": [],
+        "is_authenticating": True,
+    }
 
     try:
         result = client.login(username, password)
         logger.info(f"Login attempt for {username}: {result}")
     except Exception as e:
         logger.error(f"Login error for {username}: {str(e)}")
-        user_sessions.pop(message.from_user.id, None)
-        await message.answer(f"❌ Ошибка входа: {str(e)}. Попробуйте снова с /start.")
+        user_sessions[message.from_user.id]["is_authenticating"] = False
+        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте /start.")
         await state.clear()
         return
 
     if result == EResult.AccountLogonDenied:
-        await message.answer("📧 Введи код из Email (Steam Guard):")
+        await message.answer("📧 Введи код Steam Guard:")
         await state.set_state(AuthStates.steam_guard)
     elif result == EResult.AccountLoginDeniedNeedTwoFactor:
-        await message.answer("📱 Введи код из мобильного приложения Steam (2FA):")
+        await message.answer("📱 Введи код 2FA:")
         await state.set_state(AuthStates.steam_2fa)
     elif result == EResult.OK:
+        user_sessions[message.from_user.id]["is_authenticating"] = False
         save_session(client, message.from_user.id)
-        threading.Thread(target=run_client_events, args=(client, message.from_user.id), daemon=True).start()
-        await success_login(message, client, state)
+        threading.Thread(target=run_client_forever, args=(client, message.from_user.id), daemon=True).start()
+        await message.answer("✅ Вход успешен! Используйте /start_farm или /logout.")
         await state.clear()
     else:
-        await message.answer(f"❌ Вход не выполнен: {result.name}. Попробуйте снова с /start.")
-        user_sessions.pop(message.from_user.id, None)
+        user_sessions[message.from_user.id]["is_authenticating"] = False
+        await message.answer(f"❌ Ошибка: {result.name}. Попробуйте /start.")
         await state.clear()
 
 
@@ -401,7 +385,7 @@ async def get_email_code(message: Message, state: FSMContext):
     session["attempts"] = session.get("attempts", 0) + 1
     if session["attempts"] > 3:
         await message.answer("❌ Слишком много попыток. Начните заново с /start.")
-        user_sessions.pop(message.from_user.id, None)
+        session["is_authenticating"] = False
         await state.clear()
         return
 
@@ -415,21 +399,22 @@ async def get_email_code(message: Message, state: FSMContext):
         logger.info(f"Steam Guard attempt for {username}: {result}")
     except Exception as e:
         logger.error(f"Steam Guard error for {username}: {str(e)}")
-        user_sessions.pop(message.from_user.id, None)
-        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте снова с /start.")
+        session["is_authenticating"] = False
+        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте /start.")
         await state.clear()
         return
 
     if result == EResult.OK:
+        session["is_authenticating"] = False
         save_session(client, message.from_user.id)
-        threading.Thread(target=run_client_events, args=(client, message.from_user.id), daemon=True).start()
-        await success_login(message, client, state)
+        threading.Thread(target=run_client_forever, args=(client, message.from_user.id), daemon=True).start()
+        await message.answer("✅ Вход успешен! Используйте /start_farm или /logout.")
         await state.clear()
     elif result in (EResult.InvalidPassword, EResult.InvalidLoginAuthCode, EResult.AccountLogonDenied):
-        await message.answer("❌ Неверный код Steam Guard. Попробуйте ввести код снова:")
+        await message.answer("❌ Неверный код Steam Guard. Попробуйте снова:")
     else:
-        await message.answer(f"❌ Ошибка: {result.name}. Попробуйте снова с /start.")
-        user_sessions.pop(message.from_user.id, None)
+        session["is_authenticating"] = False
+        await message.answer(f"❌ Ошибка: {result.name}. Попробуйте /start.")
         await state.clear()
 
 
@@ -444,7 +429,7 @@ async def get_2fa_code(message: Message, state: FSMContext):
     session["attempts"] = session.get("attempts", 0) + 1
     if session["attempts"] > 3:
         await message.answer("❌ Слишком много попыток. Начните заново с /start.")
-        user_sessions.pop(message.from_user.id, None)
+        session["is_authenticating"] = False
         await state.clear()
         return
 
@@ -458,140 +443,84 @@ async def get_2fa_code(message: Message, state: FSMContext):
         logger.info(f"2FA attempt for {username}: {result}")
     except Exception as e:
         logger.error(f"2FA error for {username}: {str(e)}")
-        user_sessions.pop(message.from_user.id, None)
-        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте снова с /start.")
+        session["is_authenticating"] = False
+        await message.answer(f"❌ Ошибка: {str(e)}. Попробуйте /start.")
         await state.clear()
         return
 
     if result == EResult.OK:
+        session["is_authenticating"] = False
         save_session(client, message.from_user.id)
-        threading.Thread(target=run_client_events, args=(client, message.from_user.id), daemon=True).start()
-        await success_login(message, client, state)
+        threading.Thread(target=run_client_forever, args=(client, message.from_user.id), daemon=True).start()
+        await message.answer("✅ Вход успешен! Используйте /start_farm или /logout.")
         await state.clear()
     elif result in (EResult.InvalidPassword, EResult.TwoFactorCodeMismatch, EResult.AccountLoginDeniedNeedTwoFactor):
-        await message.answer("❌ Неверный код 2FA. Попробуйте ввести код снова:")
+        await message.answer("❌ Неверный код 2FA. Попробуйте снова:")
     else:
-        await message.answer(f"❌ Ошибка: {result.name}. Попробуйте снова с /start.")
-        user_sessions.pop(message.from_user.id, None)
+        session["is_authenticating"] = False
+        await message.answer(f"❌ Ошибка: {result.name}. Попробуйте /start.")
         await state.clear()
 
 
-async def success_login(message: Message, client: SteamClient, state: FSMContext):
-    try:
-        # Пытаемся загрузить данные пользователя
-        await load_user_data(client, message.from_user.id)
-        await asyncio.sleep(1)  # Даем время на загрузку данных
-
-        status_info = ["<b>✅ Успешный вход в Steam!</b>"]
-        errors = []
-
-        try:
-            user_name = client.user.name if client.user and hasattr(client.user,
-                                                                    'name') and client.user.name else "Недоступно"
-            status_info.append(f"<b>Имя:</b> {user_name}")
-            logger.info(f"User name accessed for {message.from_user.id}")
-        except Exception as e:
-            errors.append(f"User name: {str(e)}")
-            logger.error(f"Error accessing user name for {message.from_user.id}: {str(e)}")
-
-        try:
-            profile_url = client.steam_id.community_url if client.steam_id else "Недоступно"
-            status_info.append(f"<b>Профиль:</b> {profile_url}")
-            logger.info(f"Profile URL accessed for {message.from_user.id}")
-        except Exception as e:
-            errors.append(f"Profile URL: {str(e)}")
-            logger.error(f"Error accessing profile URL for {message.from_user.id}: {str(e)}")
-
-        try:
-            last_logon = client.user.last_logon if client.user and hasattr(client.user,
-                                                                           'last_logon') and client.user.last_logon else "Недоступно"
-            status_info.append(f"<b>Последний вход:</b> {last_logon}")
-            logger.info(f"Last logon accessed for {message.from_user.id}")
-        except Exception as e:
-            errors.append(f"Last logon: {str(e)}")
-            logger.error(f"Error accessing last logon for {message.from_user.id}: {str(e)}")
-
-        try:
-            friends_count = len(client.friends) if client.friends and hasattr(client.friends, '__len__') else 0
-            status_info.append(f"<b>Друзей:</b> {friends_count}")
-            logger.info(f"Friends count accessed for {message.from_user.id}")
-        except Exception as e:
-            errors.append(f"Friends count: {str(e)}")
-            logger.error(f"Error accessing friends count for {message.from_user.id}: {str(e)}")
-
-        try:
-            user_state = client.user.state.name if client.user and hasattr(client.user,
-                                                                           'state') and client.user.state else "Недоступно"
-            status_info.append(f"<b>Статус:</b> {user_state}")
-            logger.info(f"User state accessed for {message.from_user.id}")
-        except Exception as e:
-            errors.append(f"User state: {str(e)}")
-            logger.error(f"Error accessing user state for {message.from_user.id}: {str(e)}")
-
-        if errors:
-            status_info.append("<b>Ошибки:</b> Некоторые данные недоступны. Попробуйте /status.")
-            logger.error(f"Login errors for {message.from_user.id}: {'; '.join(errors)}")
-            await message.answer("\n".join(status_info))
-        else:
-            await message.answer("\n".join(status_info))
-            logger.info(f"Successful login for {message.from_user.id}")
-
-        user_sessions[message.from_user.id]["password"] = None  # Очищаем пароль
-    except Exception as e:
-        logger.error(f"Error formatting response for {message.from_user.id}: {str(e)}")
-        await message.answer("✅ Вход успешен, но данные временно недоступны. Попробуйте /status.")
-
-
-async def is_session_valid(client: SteamClient, username: str, password: str, user_id: int) -> bool:
-    try:
-        if not client.logged_on:
-            logger.info(f"Session not logged on for {user_id}, attempting reconnect")
-            client.reconnect()
-            await asyncio.sleep(1)
-            if not client.logged_on and password:
-                logger.info(f"Reconnect failed for {user_id}, attempting relogin")
-                if await try_relogin(client, username, password, user_id):
-                    logger.info(f"Session restored via relogin for {user_id}")
-                    return True
-                return False
-            elif not client.logged_on:
-                logger.info(f"Session still not logged on after reconnect for {user_id}")
-                return False
-        logger.info(f"Session valid (logged_on=True) for {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Session validation failed for {user_id}: {str(e)}")
-        return False
-
-
-async def keep_session_alive():
+async def check_online_status():
+    """Цикл проверки статуса пользователей каждые 60 секунд."""
+    last_notification = {}  # Для ограничения уведомлений
     while True:
         for user_id, session in list(user_sessions.items()):
+            if session.get("is_authenticating", False):
+                logger.debug(f"Skipping check for {user_id} due to ongoing authentication")
+                continue
             client = session["client"]
             username = session["username"]
             password = session.get("password")
             try:
-                if not client.logged_on:
-                    logger.info(f"Session for {user_id} not logged on, attempting reconnect")
-                    client.reconnect()
-                    await asyncio.sleep(1)
-                    if not client.logged_on and password:
-                        logger.info(f"Reconnect failed for {user_id}, attempting relogin")
-                        await try_relogin(client, username, password, user_id)
-                if client.logged_on:
-                    await load_user_data(client, user_id)
-                    logger.info(f"Session for {user_id} is alive")
+                if not client.connected or not client.logged_on:
+                    logger.info(f"Session for {user_id} not connected/logged on, attempting reconnect")
+                    if password:
+                        logger.info(f"Attempting relogin for {user_id}")
+                        if await try_relogin(client, username, password, user_id):
+                            logger.info(f"Session restored for {user_id}")
+                            if "farming_games" in session and session["farming_games"]:
+                                client.games_played(session["farming_games"])
+                                logger.info(f"Restored farming for {user_id}: {session['farming_games']}")
+                        else:
+                            logger.warning(f"Session for {user_id} requires 2FA/Steam Guard, user not notified")
+                    else:
+                        logger.warning(f"Session for {user_id} expired (no password)")
+                        current_time = asyncio.get_event_loop().time()
+                        if user_id not in last_notification or (current_time - last_notification[user_id]) > 3600:
+                            try:
+                                await bot.send_message(user_id, "⚠️ Сессия истекла. Войдите заново с /start.")
+                                last_notification[user_id] = current_time
+                            except Exception as e:
+                                logger.error(f"Failed to notify {user_id}: {str(e)}")
+                        user_sessions.pop(user_id, None)
                 else:
-                    logger.warning(f"Session for {user_id} expired")
-                    user_sessions.pop(user_id, None)
+                    logger.debug(f"Session for {user_id} is alive and connected")
             except Exception as e:
-                logger.error(f"Error keeping session alive for {user_id}: {str(e)}")
-                user_sessions.pop(user_id, None)
-        await asyncio.sleep(30)  # Проверять каждые 30 секунд
+                logger.error(f"Error checking online status for {user_id}: {str(e)}")
+                if "429" in str(e):
+                    logger.warning(f"Rate limit hit for {user_id}, pausing checks")
+                    await asyncio.sleep(60)
+                else:
+                    logger.warning(f"Non-critical error for {user_id}, will retry")
+                    if "farming_games" in session and session["farming_games"]:
+                        logger.info(f"Preserving session for {user_id} due to active farming")
+                    else:
+                        current_time = asyncio.get_event_loop().time()
+                        if user_id not in last_notification or (current_time - last_notification[user_id]) > 3600:
+                            try:
+                                await bot.send_message(user_id,
+                                                       "⚠️ Сессия истекла из-за ошибки. Войдите заново с /start.")
+                                last_notification[user_id] = current_time
+                            except Exception as e:
+                                logger.error(f"Failed to notify {user_id}: {str(e)}")
+                        user_sessions.pop(user_id, None)
+        await asyncio.sleep(60)  # Проверка каждые 60 секунд
 
 
 async def main():
-    asyncio.create_task(keep_session_alive())
+    asyncio.create_task(check_online_status())
     await dp.start_polling(bot)
 
 
