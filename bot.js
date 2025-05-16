@@ -1,7 +1,10 @@
 const { Telegraf, session, Markup } = require('telegraf');
 const SteamUser = require('steam-user');
+const SteamCommunity = require('steamcommunity');
+const http = require('http');
 
-require('dotenv').config();
+
+require('dotenv').config(); 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const userSessions = {};
 
@@ -18,8 +21,13 @@ bot.start((ctx) => {
 });
 
 bot.hears('🔑 Войти', (ctx) => {
-  ctx.session.step = 'awaiting_login';
-  ctx.reply('Введите логин от Steam:');
+  const chatId = ctx.chat.id;
+  ctx.session = {
+    step: 'awaiting_login',
+    loggedIn: false,
+  };
+  ctx.reply('Введите логин Steam:');
+  console.log(`[DEBUG] Вход инициирован для chatId: ${chatId}`);
 });
 
 bot.hears('📊 Статус', async (ctx) => {
@@ -42,62 +50,52 @@ bot.hears('📊 Статус', async (ctx) => {
     6: 'Играет',
   };
 
-  let level = '?';
-  let friends = 0;
-  let onlineFriends = [];
-  let state = 'Неизвестно';
-  let game = 'Нет';
-
   try {
-  const getSteamLevelAsync = () => new Promise((resolve, reject) => {
-    client.getSteamLevel((err, level) => {
-      if (err) reject(err);
-      else resolve(level);
+    const level = await new Promise((resolve, reject) => {
+      client.getSteamLevel((err, level) => {
+        if (err) reject(err);
+        else resolve(level);
+      });
     });
-  });
 
-  level = await getSteamLevelAsync();
+    const friendIDs = Object.keys(client.myFriends || {});
+    const friendsCount = friendIDs.length;
+    const onlineFriends = friendIDs.filter(id => client.users[id]?.persona?.state === 1).map(id => client.users[id].player_name || id);
 
-  const friendIDs = Object.keys(client.myFriends || {});
-  friends = friendIDs.length;
+    const state = personaStates[client.personaState] || 'Неизвестно';
 
-  for (let id of friendIDs) {
-    const info = client.users[id];
-    if (info?.persona?.state === 1) onlineFriends.push(info.player_name || id);
-  }
+    let game = 'Нет';
+    if (client.richPresence && client.richPresence.length > 0) {
+      game = client.richPresence[0]?.name || 'Игра';
+    } else if (client.playingAppIDs && client.playingAppIDs.length > 0) {
+      game = `AppID ${client.playingAppIDs[0]}`;
+    }
 
-  state = personaStates[client?.personaState || 0];
-
-  if (client?.richPresence?.length > 0) {
-    game = client.richPresence[0]?.name || 'Игра';
-  } else if (client?.playingAppIDs?.length > 0) {
-    game = `AppID ${client.playingAppIDs[0]}`;
-  }
-
-} catch (e) {
-  console.log('[STATUS ERROR]', e.message);
-}
-
-  ctx.reply(`📊 <b>Статус аккаунта:</b>
+    ctx.reply(`📊 <b>Статус аккаунта:</b>
 🔗 В сети: ${state}
 ⭐️ Уровень: ${level}
-👥 Друзей: ${friends}
+👥 Друзей: ${friendsCount}
 🟢 Онлайн-друзей: ${onlineFriends.length > 0 ? onlineFriends.length + ' (' + onlineFriends.join(', ') + ')' : 'Нет'}
 🎮 Игра: ${game}`, { parse_mode: 'HTML' });
+
+  } catch (e) {
+    console.log('[STATUS ERROR]', e.message);
+    ctx.reply('❌ Ошибка получения статуса.');
+  }
 });
 
-bot.hears('🚀 Старт', async (ctx) => {
+bot.hears('🚀 Старт', (ctx) => {
   const chatId = ctx.chat.id;
   const session = ctx.session;
   const client = userSessions[chatId]?.steamClient;
 
-  if (!session.loggedIn || !client?.steamID) {
-    ctx.reply('❌ Вы не вошли в аккаунт Steam.');
+  if (!session.loggedIn || !client) {
+    ctx.reply('❌ Сначала войдите в Steam командой "🔑 Войти".');
     return;
   }
 
-  ctx.session.step = 'awaiting_appid';
-  ctx.reply('📥 Введите AppID игры для фарма часов (например, 730):');
+  session.step = 'awaiting_appid';
+  ctx.reply('Введите AppID игры для фарма (например, 730 для CS2):');
 });
 
 bot.hears('🛑 Стоп', (ctx) => {
@@ -105,7 +103,7 @@ bot.hears('🛑 Стоп', (ctx) => {
   const session = ctx.session;
   const client = userSessions[chatId]?.steamClient;
 
-  if (!session.loggedIn || !client?.steamID) {
+  if (!session.loggedIn || !client) {
     ctx.reply('❌ Вы не вошли в аккаунт Steam.');
     return;
   }
@@ -123,13 +121,14 @@ bot.hears('🚪 Выйти', (ctx) => {
     client.logOff();
     delete userSessions[chatId];
     ctx.session.loggedIn = false;
+    ctx.session.step = null;
     ctx.reply('👋 Вы вышли из аккаунта Steam.');
   } else {
     ctx.reply('❌ Вы не вошли в аккаунт.');
   }
 });
 
-bot.on('text', async (ctx) => {
+bot.on('text', (ctx) => {
   const step = ctx.session.step;
   const chatId = ctx.chat.id;
 
@@ -137,22 +136,23 @@ bot.on('text', async (ctx) => {
     ctx.session.login = ctx.message.text;
     ctx.session.step = 'awaiting_password';
     ctx.reply('Введите пароль от Steam:');
+
   } else if (step === 'awaiting_password') {
     const login = ctx.session.login;
     const password = ctx.message.text;
 
     const client = new SteamUser();
-    userSessions[chatId] = { steamClient: client };
+    const community = new SteamCommunity();
 
-    client.logOn({
-      accountName: login,
-      password: password
-    });
+    userSessions[chatId] = { steamClient: client, community };
 
+    // Обработчики SteamUser
     client.on('loggedOn', () => {
       ctx.session.loggedIn = true;
       ctx.session.step = null;
+      client.setPersona(SteamUser.EPersonaState.Online);
       ctx.reply('✅ Вы успешно вошли в Steam!');
+      console.log(`[DEBUG] Пользователь ${login} вошёл в Steam (chatId: ${chatId})`);
     });
 
     client.on('steamGuard', (domain, callback) => {
@@ -165,13 +165,25 @@ bot.on('text', async (ctx) => {
       ctx.session.loggedIn = false;
       ctx.session.step = null;
       ctx.reply('❌ Ошибка входа: ' + err.message);
+      delete userSessions[chatId];
+      console.log(`[DEBUG] Ошибка входа для chatId ${chatId}: ${err.message}`);
     });
+
+    client.logOn({
+      accountName: login,
+      password: password
+    });
+
+    ctx.reply('⏳ Пытаемся войти...');
+
   } else if (step === 'awaiting_guard') {
     const code = ctx.message.text;
     if (ctx.session.guardCallback) {
       ctx.session.guardCallback(code);
       ctx.session.step = null;
+      ctx.reply('✅ Код Steam Guard отправлен, продолжаем вход...');
     }
+
   } else if (step === 'awaiting_appid') {
     const appid = parseInt(ctx.message.text);
     if (isNaN(appid)) {
@@ -180,11 +192,37 @@ bot.on('text', async (ctx) => {
     }
 
     const client = userSessions[chatId]?.steamClient;
+
+    if (!client) {
+      ctx.reply('❌ Клиент Steam не найден. Сначала войдите в аккаунт.');
+      ctx.session.step = null;
+      return;
+    }
+
     client.gamesPlayed([appid]);
     ctx.session.step = null;
     ctx.reply(`🎮 Запущена игра с AppID ${appid} для фарма часов.`);
   }
 });
+
+
+// Создаем простой HTTP-сервер, чтобы Render.com знал, что приложение запущено
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Bot is running');
+}).listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
+
+setInterval(() => {
+  http.get(`http://localhost:${PORT}`, (res) => {
+    console.log(`[Heartbeat] Status code: ${res.statusCode}`);
+  }).on('error', (err) => {
+    console.error(`[Heartbeat] Ошибка: ${err.message}`);
+  });
+}, 5 * 60 * 1000); // каждые 5 минут
 
 bot.launch();
 
