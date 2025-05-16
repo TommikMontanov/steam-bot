@@ -1,2 +1,13 @@
-npm init -y
-npm install telegraf steam-user
+{
+  "name": "steam-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot to manage Steam sessions and farming",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.12.2",
+    "steam-user": "^4.19.9"
+  }
+}
