@@ -6,7 +6,6 @@ const https = require('https');
 
 
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
 
 console.log('BOT_TOKEN:', process.env.BOT_TOKEN); // 👉 добавь эту строку
 
