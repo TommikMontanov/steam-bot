@@ -5,7 +5,11 @@ const http = require('http');
 const https = require('https');
 
 
-require('dotenv').config(); 
+require('dotenv').config();
+const { Telegraf } = require('telegraf');
+
+console.log('BOT_TOKEN:', process.env.BOT_TOKEN); // 👉 добавь эту строку
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const userSessions = {};
 
