@@ -2,6 +2,7 @@ const { Telegraf, session, Markup } = require('telegraf');
 const SteamUser = require('steam-user');
 const SteamCommunity = require('steamcommunity');
 const http = require('http');
+const https = require('https');
 
 
 require('dotenv').config(); 
@@ -22,6 +23,12 @@ bot.start((ctx) => {
 
 bot.hears('🔑 Войти', (ctx) => {
   const chatId = ctx.chat.id;
+
+  if (ctx.session.loggedIn) {
+    ctx.reply('✅ Вы уже вошли в Steam. Используйте команды "📊 Статус", "🚀 Старт" или "🚪 Выйти".');
+    return;
+  }
+
   ctx.session = {
     step: 'awaiting_login',
     loggedIn: false,
@@ -208,6 +215,7 @@ bot.on('text', (ctx) => {
 
 // Создаем простой HTTP-сервер, чтобы Render.com знал, что приложение запущено
 const PORT = process.env.PORT || 3000;
+const SELF_URL = 'https://steam-bot.onrender.com'; // ← Укажи тут свой настоящий адрес сайта!
 
 http.createServer((req, res) => {
   res.writeHead(200);
@@ -216,13 +224,14 @@ http.createServer((req, res) => {
   console.log(`Server listening on port ${PORT}`);
 });
 
+// Пинг внешнего адреса каждые 30 секунд (рекомендуется для Render)
 setInterval(() => {
-  http.get(`http://localhost:${PORT}`, (res) => {
+  https.get(SELF_URL, (res) => {
     console.log(`[Heartbeat] Status code: ${res.statusCode}`);
   }).on('error', (err) => {
     console.error(`[Heartbeat] Ошибка: ${err.message}`);
   });
-}, 5 * 60 * 1000); // каждые 5 минут
+}, 30 * 1000);
 
 bot.launch();
 
