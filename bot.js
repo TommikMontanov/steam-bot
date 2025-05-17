@@ -215,7 +215,7 @@ bot.on('text', (ctx) => {
 
 // Создаем простой HTTP-сервер, чтобы Render.com знал, что приложение запущено
 const PORT = process.env.PORT || 3000;
-const SELF_URL = 'https://steam-bot.onrender.com'; // ← Укажи тут свой настоящий адрес сайта!
+const SELF_URL = 'https://steam-bot-kb0y.onrender.com'; // ← Укажи тут свой настоящий адрес сайта!
 
 http.createServer((req, res) => {
   res.writeHead(200);
