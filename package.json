@@ -9,6 +9,7 @@
   "dependencies": {
     "dotenv": "^16.3.1",
     "steam-user": "^4.19.9",
+    "telegraf-session-local": "^2.1.1",
     "steamcommunity": "^3.43.0", 
     "telegraf": "^4.12.2"
   }
