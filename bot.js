@@ -8,7 +8,7 @@ const fs = require('fs');
 
 require('dotenv').config();
 
-console.log('BOT_TOKEN:', process.env.BOT_TOKEN); // 👉 добавь эту строку
+console.log('BOT_TOKEN:', process.env.BOT_TOKEN);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -22,7 +22,7 @@ const popularApps = {
   570: 'Dota 2',
   271590: 'Grand Theft Auto V',
   1172470: 'Apex Legends',
-  444090: 'Paladins', // Добавлен AppID 444090
+  444090: 'Paladins',
   252490: 'Rust',
   4000: 'Garry\'s Mod',
   550: 'Left 4 Dead 2',
@@ -107,6 +107,37 @@ async function getAppName(community, appid) {
   }
 }
 
+// Функция для периодического вызова webLogOn
+function startWebLogOnInterval(chatId, community) {
+  // Вызываем webLogOn сразу
+  community.webLogOn((err) => {
+    if (err) {
+      console.error(`[WEBLOGON ОШИБКА] Не удалось выполнить начальный webLogOn для chatId: ${chatId}`, err);
+    } else {
+      console.log(`[INFO] Начальный webLogOn успешен для chatId: ${chatId}`);
+    }
+  });
+
+  // Настраиваем периодический вызов webLogOn каждые 30 минут
+  const interval = setInterval(() => {
+    if (!userSessions[chatId] || !userSessions[chatId].steamClient.steamID) {
+      clearInterval(interval);
+      console.log(`[INFO] Остановлен интервал webLogOn для chatId: ${chatId}`);
+      return;
+    }
+    community.webLogOn((err) => {
+      if (err) {
+        console.error(`[WEBLOGON ОШИБКА] Периодический webLogOn не удался для chatId: ${chatId}`, err);
+      } else {
+        console.log(`[INFO] Периодический webLogOn успешен для chatId: ${chatId}`);
+      }
+    });
+  }, 30 * 60 * 1000); // 30 минут
+
+  // Сохраняем интервал в userSessions для последующей очистки
+  userSessions[chatId].webLogOnInterval = interval;
+}
+
 bot.use(new LocalSession({ database: 'sessions.json' }).middleware());
 
 bot.start((ctx) => {
@@ -131,6 +162,9 @@ bot.hears('🔑 Войти', (ctx) => {
   // Очищаем старую сессию
   if (userSessions[chatId]) {
     userSessions[chatId].steamClient.logOff();
+    if (userSessions[chatId].webLogOnInterval) {
+      clearInterval(userSessions[chatId].webLogOnInterval);
+    }
     delete userSessions[chatId];
   }
 
@@ -214,7 +248,7 @@ bot.hears('📊 Статус', async (ctx) => {
     // Получаем статус и имя друзей
     if (friendIDs.length > 0) {
       try {
-        const limitedFriendIDs = friendIDs.slice(0, 25); // Уменьшено до 25
+        const limitedFriendIDs = friendIDs.slice(0, 25);
         const personas = await new Promise((resolve, reject) => {
           client.getPersonas(limitedFriendIDs, (err, personas) => {
             if (err) reject(err);
@@ -301,6 +335,9 @@ bot.hears('🚪 Выйти', (ctx) => {
 
   if (client) {
     client.logOff();
+    if (userSessions[chatId]?.webLogOnInterval) {
+      clearInterval(userSessions[chatId].webLogOnInterval);
+    }
     delete userSessions[chatId];
     session.loggedIn = false;
     session.step = null;
@@ -339,6 +376,9 @@ bot.on('text', async (ctx) => {
     const loginTimeout = setTimeout(() => {
       ctx.reply('❌ Время ожидания входа истекло. Попробуйте снова с "🔑 Войти".');
       client.logOff();
+      if (userSessions[chatId]?.webLogOnInterval) {
+        clearInterval(userSessions[chatId].webLogOnInterval);
+      }
       delete userSessions[chatId];
       ctx.session.loggedIn = false;
       ctx.session.step = null;
@@ -351,6 +391,10 @@ bot.on('text', async (ctx) => {
       ctx.session.step = null;
       client.setPersona(SteamUser.EPersonaState.Online);
       console.log('[DEBUG] Logged on, personaState:', client.personaState, 'steamID:', client.steamID?.toString());
+      
+      // Запускаем webLogOn и периодическое обновление
+      startWebLogOnInterval(chatId, community);
+      
       ctx.reply('✅ Вы успешно вошли в Steam!');
       console.log(`[DEBUG] Пользователь ${login} вошёл в Steam (chatId: ${chatId})`);
     });
@@ -369,6 +413,9 @@ bot.on('text', async (ctx) => {
       const guardTimeout = setTimeout(() => {
         ctx.reply('❌ Время ввода кода Steam Guard истекло. Попробуйте снова с "🔑 Войти".');
         client.logOff();
+        if (userSessions[chatId]?.webLogOnInterval) {
+          clearInterval(userSessions[chatId].webLogOnInterval);
+        }
         delete userSessions[chatId];
         ctx.session.loggedIn = false;
         ctx.session.step = null;
@@ -384,6 +431,9 @@ bot.on('text', async (ctx) => {
       ctx.session.step = null;
       ctx.reply(`❌ Ошибка входа: ${err.message}. Попробуйте снова с "🔑 Войти".`);
       client.logOff();
+      if (userSessions[chatId]?.webLogOnInterval) {
+        clearInterval(userSessions[chatId].webLogOnInterval);
+      }
       delete userSessions[chatId];
       console.log(`[DEBUG] Ошибка входа для chatId ${chatId}: ${err.message}`);
     });
@@ -393,6 +443,9 @@ bot.on('text', async (ctx) => {
       ctx.session.loggedIn = false;
       ctx.session.step = null;
       ctx.reply(`❌ Соединение с Steam потеряно: ${msg || 'Неизвестная ошибка'}. Попробуйте снова с "🔑 Войти".`);
+      if (userSessions[chatId]?.webLogOnInterval) {
+        clearInterval(userSessions[chatId].webLogOnInterval);
+      }
       delete userSessions[chatId];
       console.log(`[DEBUG] Disconnected for chatId ${chatId}: eresult=${eresult}, msg=${msg}`);
     });
