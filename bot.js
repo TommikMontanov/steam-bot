@@ -158,7 +158,7 @@ bot.hears('🔑 Войти', (ctx) => {
   const chatId = ctx.chat.id;
 
   // Проверяем, действительно ли пользователь авторизован
- अगर (ctx.session.loggedIn && userSessions[chatId]?.steamClient?.steamID) {
+ if (ctx.session.loggedIn && userSessions[chatId]?.steamClient?.steamID) {
     ctx.reply('✅ Вы уже вошли в Steam. Используйте команды "📊 Статус", "🚀 Старт" или "🚪 Выйти".');
     return;
   }
