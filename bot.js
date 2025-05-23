@@ -511,7 +511,7 @@ bot.on('text', async (ctx) => {
 
 // Создаем HTTP-сервер для Render
 const PORT = process.env.PORT || 3000;
-const SELF_URL = 'https://steam-bot-lzlp.onrender.com';
+const SELF_URL = 'https://steam-bot-g7ef.onrender.com';
 
 http.createServer((req, res) => {
   res.writeHead(200);
