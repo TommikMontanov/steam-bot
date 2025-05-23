@@ -158,7 +158,7 @@ bot.hears('🔑 Войти', (ctx) => {
   const chatId = ctx.chat.id;
 
   // Проверяем, действительно ли пользователь авторизован
-  if (ctx.session.loggedIn && userSessions[chatId]?.steamClient?.steamID) {
+ अगर (ctx.session.loggedIn && userSessions[chatId]?.steamClient?.steamID) {
     ctx.reply('✅ Вы уже вошли в Steam. Используйте команды "📊 Статус", "🚀 Старт" или "🚪 Выйти".');
     return;
   }
@@ -244,7 +244,7 @@ bot.hears('📊 Статус', async (ctx) => {
     console.log('[DEBUG] friendIDs for chatId:', chatId, friendIDs);
 
     // Формируем сообщение
-    console.log('[DEBUG] client.personaState for chatId:', client.personaState);
+    console.log('[DEBUG] client.personaState for chatId:', chatId, client.personaState);
     let msg = `📊 <b>Статус аккаунта:</b>\n` +
               `⭐️ Уровень: ${level}\n` +
               `👥 Друзей: ${friendIDs.length}\n`;
@@ -433,25 +433,25 @@ bot.on('text', async (ctx) => {
       clearTimeout(loginTimeout);
       ctx.session.loggedIn = false;
       ctx.session.step = null;
-      ctx.reply(`❌ Ошибка входа: ${err.message}. Попробуйте снова с "🔑 Войти".');
+      ctx.reply(`❌ Ошибка входа: ${err.message}. Попробуйте снова с "🔑 Войти".`);
       client.logOff();
       if (userSessions[chatId]?.webLogOnInterval) {
         clearInterval(userSessions[chatId].webLogOnInterval);
       }
       delete userSessions[chatId];
-      console.log(`[DEBUG] Ошибка входа для chatId ${chatId}: ${err.message}`);
+      console.log(`[DEBUG] Ошибка входа для chatId: ${chatId}: ${err.message}`);
     });
 
     client.on('disconnected', (eresult, msg) => {
       clearTimeout(loginTimeout);
       ctx.session.loggedIn = false;
       ctx.session.step = null;
-      ctx.reply(`❌ Соединение с Steam потеряно: ${msg || 'Неизвестная ошибка'}. Попробуйте снова с "🔑 Войти".');
+      ctx.reply(`❌ Соединение с Steam потеряно: ${msg || 'Неизвестная ошибка'}. Попробуйте снова с "🔑 Войти".`);
       if (userSessions[chatId]?.webLogOnInterval) {
         clearInterval(userSessions[chatId].webLogOnInterval);
       }
       delete userSessions[chatId];
-      console.log(`[DEBUG] Disconnected for chatId ${chatId}: eresult=${eresult}, msg=${msg}`);
+      console.log(`[DEBUG] Disconnected для chatId: ${chatId}: eresult=${eresult}, msg=${msg}`);
     });
 
     try {
