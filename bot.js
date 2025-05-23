@@ -107,14 +107,16 @@ async function getAppName(community, appid) {
   }
 }
 
-// Функция для периодического вызова webLogOn
-function startWebLogOnInterval(chatId, community) {
+// Функция для периодической аутентификации веб-сессии через steam-user
+function startWebLogOnInterval(chatId, client, community) {
   // Вызываем webLogOn сразу
-  community.webLogOn((err) => {
+  client.webLogOn((err) => {
     if (err) {
       console.error(`[WEBLOGON ОШИБКА] Не удалось выполнить начальный webLogOn для chatId: ${chatId}`, err);
     } else {
       console.log(`[INFO] Начальный webLogOn успешен для chatId: ${chatId}`);
+      // Синхронизируем куки с community
+      community.setCookies(client._sessionCookies || []);
     }
   });
 
@@ -125,11 +127,13 @@ function startWebLogOnInterval(chatId, community) {
       console.log(`[INFO] Остановлен интервал webLogOn для chatId: ${chatId}`);
       return;
     }
-    community.webLogOn((err) => {
+    client.webLogOn((err) => {
       if (err) {
         console.error(`[WEBLOGON ОШИБКА] Периодический webLogOn не удался для chatId: ${chatId}`, err);
       } else {
         console.log(`[INFO] Периодический webLogOn успешен для chatId: ${chatId}`);
+        // Синхронизируем куки с community
+        community.setCookies(client._sessionCookies || []);
       }
     });
   }, 30 * 60 * 1000); // 30 минут
@@ -240,7 +244,7 @@ bot.hears('📊 Статус', async (ctx) => {
     console.log('[DEBUG] friendIDs for chatId:', chatId, friendIDs);
 
     // Формируем сообщение
-    console.log('[DEBUG] client.personaState for chatId:', chatId, client.personaState);
+    console.log('[DEBUG] client.personaState for chatId:', client.personaState);
     let msg = `📊 <b>Статус аккаунта:</b>\n` +
               `⭐️ Уровень: ${level}\n` +
               `👥 Друзей: ${friendIDs.length}\n`;
@@ -393,7 +397,7 @@ bot.on('text', async (ctx) => {
       console.log('[DEBUG] Logged on, personaState:', client.personaState, 'steamID:', client.steamID?.toString());
       
       // Запускаем webLogOn и периодическое обновление
-      startWebLogOnInterval(chatId, community);
+      startWebLogOnInterval(chatId, client, community);
       
       ctx.reply('✅ Вы успешно вошли в Steam!');
       console.log(`[DEBUG] Пользователь ${login} вошёл в Steam (chatId: ${chatId})`);
@@ -429,7 +433,7 @@ bot.on('text', async (ctx) => {
       clearTimeout(loginTimeout);
       ctx.session.loggedIn = false;
       ctx.session.step = null;
-      ctx.reply(`❌ Ошибка входа: ${err.message}. Попробуйте снова с "🔑 Войти".`);
+      ctx.reply(`❌ Ошибка входа: ${err.message}. Попробуйте снова с "🔑 Войти".');
       client.logOff();
       if (userSessions[chatId]?.webLogOnInterval) {
         clearInterval(userSessions[chatId].webLogOnInterval);
@@ -442,7 +446,7 @@ bot.on('text', async (ctx) => {
       clearTimeout(loginTimeout);
       ctx.session.loggedIn = false;
       ctx.session.step = null;
-      ctx.reply(`❌ Соединение с Steam потеряно: ${msg || 'Неизвестная ошибка'}. Попробуйте снова с "🔑 Войти".`);
+      ctx.reply(`❌ Соединение с Steam потеряно: ${msg || 'Неизвестная ошибка'}. Попробуйте снова с "🔑 Войти".');
       if (userSessions[chatId]?.webLogOnInterval) {
         clearInterval(userSessions[chatId].webLogOnInterval);
       }
